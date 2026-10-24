@@ -97,3 +97,6 @@ util/wcs-match
 util/wcs-pv2sip
 report.txt
 .DS_Store
+wasi-sdk-34.0-x86_64-linux
+solver/wasm
+.idea

@@ -51,14 +51,44 @@
 
 #include "datalog.h"
 
+/*
+ * Host-driven jobs (WASI only).  If the environment variable AN_HOST_JOBS is set, jobs are not taken from
+ * argv or -f: instead the host is asked for the next one through the import an.next_job, which is polled
+ * (with a short sleep in between) until a job is ready.  The value of AN_HOST_JOBS is the directory (as the
+ * guest sees it) that holds one folder per job: job number N is read from  $AN_HOST_JOBS/jN/job.axy.
+ *
+ *   int  an.next_job(void)       never blocks: the next job number (> 0), -1 if there is none yet, or 0 to shut
+ *                                the engine down.  (A host callback that blocks counts as "in flight" in
+ *                                wasmtime4j, which then makes closing any other linker wait for it.)
+ *   void an.job_done(int id)     job id has been run (whether or not it solved: see the job's output files)
+ *   void an.job_failed(int id)   job id could not be started: its job file could not be read
+ */
+#include <unistd.h>
+#define HOST_POLL_US 20000   // how long the guest sleeps between asks while there is no job
+
+#ifdef __wasi__
+__attribute__((import_module("an"), import_name("next_job")))
+extern int an_host_next_job(void);
+__attribute__((import_module("an"), import_name("job_done")))
+extern void an_host_job_done(int id);
+__attribute__((import_module("an"), import_name("job_failed")))
+extern void an_host_job_failed(int id);
+#define HOST_JOBS_DIR() getenv("AN_HOST_JOBS")
+#else
+static int an_host_next_job(void) { return 0; }
+static void an_host_job_done(int id) { }
+static void an_host_job_failed(int id) { }
+#define HOST_JOBS_DIR() ((char*)NULL)
+#endif
+
 static an_option_t myopts[] = {
     {'h', "help", no_argument, NULL, "print this help"},
     {'v', "verbose", no_argument, NULL, "+verbose"},
     {'c', "config",  required_argument, "file",
      "Use this config file (default: \"astrometry.cfg\" in the directory ../etc/ relative to the directory containing the \"astrometry-engine\" executable); 'none' for no config file"},
-    {'d', "base-dir",  required_argument, "dir", 
+    {'d', "base-dir",  required_argument, "dir",
      "set base directory of all output filenames."},
-    {'C', "cancel",  required_argument, "file", 
+    {'C', "cancel",  required_argument, "file",
      "quit solving if this file appears" },
     {'s', "solved",  required_argument, "file",
      "write to this file when a field is solved"},
@@ -113,6 +143,9 @@ int main(int argc, char** args) {
     char* infn = NULL;
     FILE* fin = NULL;
     anbool fromstdin = FALSE;
+    char* hostjobs = HOST_JOBS_DIR();
+    int hostid = 0;
+    char hostfn[1024];
 
     bl* opts = opts_from_array(myopts, sizeof(myopts)/sizeof(an_option_t), NULL);
     sl* index_files = sl_new(4);
@@ -173,7 +206,7 @@ int main(int argc, char** args) {
         }
     }
 
-    if (optind == argc && !infn) {
+    if (optind == argc && !infn && !hostjobs) {
         // Need extra args: filename
         printf("You must specify at least one input file!\n\n");
         help = TRUE;
@@ -203,7 +236,7 @@ int main(int argc, char** args) {
         data_log_start();
     }
 
-    if (infn) {
+    if (infn && !hostjobs) {
         logverb("Reading input filenames from %s\n", (fromstdin ? "stdin" : infn));
         if (!fromstdin) {
             fin = fopen(infn, "rb");
@@ -322,7 +355,15 @@ int main(int argc, char** args) {
         job_t* job;
         struct timeval tv1, tv2;
 
-        if (infn) {
+        if (hostjobs) {
+            // Ask the host for the next job; poll (sleeping in between) until there is one.
+            while ((hostid = an_host_next_job()) < 0)
+                usleep(HOST_POLL_US);
+            if (hostid == 0)
+                break;
+            snprintf(hostfn, sizeof(hostfn), "%s/j%d/job.axy", hostjobs, hostid);
+            jobfn = hostfn;
+        } else if (infn) {
             // Read name of next input file to be read.
             logverb("\nWaiting for next input filename...\n");
             jobfn = read_string_terminated(fin, "\n\r\0", 3, FALSE);
@@ -339,6 +380,11 @@ int main(int argc, char** args) {
         job = engine_read_job_file(engine, jobfn);
         if (!job) {
             ERROR("Failed to read job file \"%s\"", jobfn);
+            if (hostjobs) {
+                // keep the engine alive and tell the host
+                an_host_job_failed(hostid);
+                continue;
+            }
             exit(-1);
         }
 
@@ -353,6 +399,8 @@ int main(int argc, char** args) {
         job_free(job);
         gettimeofday(&tv2, NULL);
         logverb("Spent %g seconds on this field.\n", millis_between(&tv1, &tv2)/1000.0);
+        if (hostjobs)
+            an_host_job_done(hostid);
     }
 
     engine_free(engine);

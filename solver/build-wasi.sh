@@ -58,6 +58,7 @@ link() { local out=$1; shift; [ -z "${AN_VERBOSE:-}" ] || echo "[link] $out" >&2
 link astrometry-engine                     $ENGINE
 link astrometry-engine-hostmmap            $ENGINE $HOSTMMAP # needs the host to provide an.map / an.unmap
 link augment-xylist                        solver/augment-xylist-main.c solver/augment-xylist.c solver/wasi/compat.c
+link kd-cone                               solver/kd-cone-main.c solver/wasi/compat.c -mexec-model=reactor #todo hostmap?
 # Both engine variants import an.next_job (used only when AN_HOST_JOBS is set); the host must define it.
 for f in astrometry-engine astrometry-engine-hostmmap; do   # import names are stored as plain text in the module
     grep -q next_job solver/wasm/$f.wasm || { echo "$f.wasm is missing the an.next_job import" >&2; exit 1; }
